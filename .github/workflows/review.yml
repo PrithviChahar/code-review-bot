@@ -1,0 +1,29 @@
+name: PR Review Bot
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Uses the default `pull_request` trigger (NOT pull_request_target).
+# Known M1 limitation: forked-repo PRs get a read-only GITHUB_TOKEN and no
+# secrets (GROQ_API_KEY is not exposed to fork PRs), so comment posting will
+# fail for those PRs. That is expected and documented, not a bug to fix here.
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run review bot
+        run: python app/main.py
