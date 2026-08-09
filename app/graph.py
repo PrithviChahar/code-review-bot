@@ -7,6 +7,8 @@ Topology:
            +-> summary  -+
 """
 
+import random
+import time
 from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -14,6 +16,15 @@ from langgraph.graph import END, START, StateGraph
 from agents import reviewer, security, summary, tests
 
 SEVERITY_ORDER = {"critical": 0, "warning": 1, "nit": 2}
+
+STAGGER_MIN = 0.5
+STAGGER_MAX = 2.0
+
+
+def _stagger():
+    """Random start delay to desync the 4-agent burst and ease the Groq
+    30-RPM free-tier window. Keeps the graph parallel; just offsets starts."""
+    time.sleep(random.uniform(STAGGER_MIN, STAGGER_MAX))
 
 
 class ReviewState(TypedDict):
@@ -27,18 +38,22 @@ class ReviewState(TypedDict):
 
 
 def reviewer_node(state):
+    _stagger()
     return {"reviewer_result": reviewer.review(state["diff_text"])}
 
 
 def security_node(state):
+    _stagger()
     return {"security_result": security.scan(state["diff_text"])}
 
 
 def tests_node(state):
+    _stagger()
     return {"test_result": tests.find_gaps(state["diff_text"])}
 
 
 def summary_node(state):
+    _stagger()
     return {"summary_result": summary.summarize(state["diff_text"])}
 
 
