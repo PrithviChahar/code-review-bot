@@ -5,6 +5,7 @@ All agents call through this module so the retry/parse logic lives once.
 
 import json
 import os
+import random
 import sys
 import time
 
@@ -13,6 +14,7 @@ import requests
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.3-70b-versatile"
 GROQ_MAX_TOKENS = 2048
+GROQ_MAX_429_ATTEMPTS = 3
 
 
 class UnparseableResponse(Exception):
@@ -21,6 +23,10 @@ class UnparseableResponse(Exception):
     def __init__(self, raw_text):
         super().__init__("LLM response was not valid JSON after re-prompt")
         self.raw_text = raw_text
+
+
+class RateLimitedError(Exception):
+    """Raised when Groq keeps returning 429 after all retry attempts."""
 
 
 def get_api_key():
@@ -60,17 +66,19 @@ def chat_raw(system_prompt, user_content, parse_error=None, api_key=None):
     }
     headers = {"Authorization": f"Bearer {api_key}"}
 
-    for attempt in range(2):
+    for attempt in range(GROQ_MAX_429_ATTEMPTS):
         resp = requests.post(GROQ_API_URL, headers=headers, json=body, timeout=120)
-        if resp.status_code == 429 and attempt == 0:
+        if resp.status_code == 429 and attempt < GROQ_MAX_429_ATTEMPTS - 1:
             retry_after = resp.headers.get("Retry-After")
-            delay = float(retry_after) if retry_after else 5.0
-            print(f"Rate limited (HTTP 429); retrying in {delay}s", file=sys.stderr)
+            delay = (float(retry_after) if retry_after else 5.0) + random.uniform(0, 3)
+            print(f"Rate limited (HTTP 429); retrying in {delay:.1f}s", file=sys.stderr)
             time.sleep(delay)
             continue
+        if resp.status_code == 429:
+            raise RateLimitedError(f"Groq rate limit persisted after {GROQ_MAX_429_ATTEMPTS} attempts")
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
-    raise RuntimeError("Groq rate limit persisted after retry")
+    raise RateLimitedError(f"Groq rate limit persisted after {GROQ_MAX_429_ATTEMPTS} attempts")
 
 
 def parse_json(text):
@@ -112,6 +120,8 @@ def chat_issues(system_prompt, diff_text, api_key=None):
         data = chat_json(system_prompt, user_content, api_key=api_key)
     except UnparseableResponse as err:
         return [{"file": "?", "message": f"[unparseable response] {err.raw_text[:400]}"}]
+    except RateLimitedError as err:
+        return [{"file": "?", "message": f"[rate limited - review skipped] {err}"}]
     issues = data.get("issues")
     if not isinstance(issues, list):
         return [{"file": "?", "message": f"[unexpected schema] {str(data)[:400]}"}]
