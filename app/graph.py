@@ -1,10 +1,13 @@
-"""LangGraph orchestration: 4 parallel agents + combine (M2).
+"""LangGraph orchestration: parallel agents + semgrep-grounded security (M3).
 
 Topology:
-    START -+-> reviewer -+
-           |-> security -|
-           |-> tests    -+-> combine -> END
-           +-> summary  -+
+    START -+-> reviewer -----+
+           |-> tests    -----+-> combine -> END
+           |-> summary  -----+
+           +-> semgrep -> security -----+
+
+reviewer/tests/summary run in parallel; semgrep must complete before the
+security agent runs (it consumes Semgrep's findings as input).
 """
 
 import random
@@ -14,6 +17,7 @@ from typing import TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from agents import reviewer, security, summary, tests
+from semgrep_runner import run_semgrep
 
 SEVERITY_ORDER = {"critical": 0, "warning": 1, "nit": 2}
 
@@ -22,29 +26,27 @@ STAGGER_MAX = 2.0
 
 
 def _stagger():
-    """Random start delay to desync the 4-agent burst and ease the Groq
-    30-RPM free-tier window. Keeps the graph parallel; just offsets starts."""
+    """Random start delay to desync the agent burst and ease the Groq
+    30-RPM free-tier window. Keeps the graph parallel; just offsets starts.
+    Applied only to the still-parallel agents (reviewer/tests/summary)."""
     time.sleep(random.uniform(STAGGER_MIN, STAGGER_MAX))
 
 
 class ReviewState(TypedDict):
     diff_text: str
     truncated: bool
+    repo_path: str
     reviewer_result: list
     security_result: list
     test_result: list
     summary_result: str
+    semgrep_findings: list
     comment: str
 
 
 def reviewer_node(state):
     _stagger()
     return {"reviewer_result": reviewer.review(state["diff_text"])}
-
-
-def security_node(state):
-    _stagger()
-    return {"security_result": security.scan(state["diff_text"])}
 
 
 def tests_node(state):
@@ -55,6 +57,14 @@ def tests_node(state):
 def summary_node(state):
     _stagger()
     return {"summary_result": summary.summarize(state["diff_text"])}
+
+
+def semgrep_node(state):
+    return {"semgrep_findings": run_semgrep(state["repo_path"])}
+
+
+def security_node(state):
+    return {"security_result": security.scan(state["diff_text"], state.get("semgrep_findings") or [])}
 
 
 def _format_issue_section(issues):
@@ -125,11 +135,13 @@ def build_graph():
     builder.add_node("security", security_node)
     builder.add_node("tests", tests_node)
     builder.add_node("summary", summary_node)
+    builder.add_node("semgrep", semgrep_node)
     builder.add_node("combine", combine_node)
     builder.add_edge(START, "reviewer")
-    builder.add_edge(START, "security")
     builder.add_edge(START, "tests")
     builder.add_edge(START, "summary")
+    builder.add_edge(START, "semgrep")
+    builder.add_edge("semgrep", "security")
     for node in ("reviewer", "security", "tests", "summary"):
         builder.add_edge(node, "combine")
     builder.add_edge("combine", END)

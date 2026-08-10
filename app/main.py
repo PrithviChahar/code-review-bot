@@ -53,10 +53,12 @@ def main():
         {
             "diff_text": diff,
             "truncated": truncated,
+            "repo_path": os.getcwd(),
             "reviewer_result": [],
             "security_result": [],
             "test_result": [],
             "summary_result": "",
+            "semgrep_findings": [],
         }
     )
 

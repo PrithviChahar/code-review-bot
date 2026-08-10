@@ -20,10 +20,25 @@ jobs:
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
     steps:
       - uses: actions/checkout@v4
+        # SAFETY NOTE (M3): checking out the PR code is safe in THIS workflow
+        # because it still uses the default `pull_request` trigger, NOT
+        # `pull_request_target`. Under `pull_request`, fork PRs get a
+        # read-only GITHUB_TOKEN and no secrets regardless of what gets
+        # checked out. Checkout only becomes dangerous when combined with
+        # `pull_request_target`, which runs against the base repo with write
+        # permissions on untrusted code — that combination is explicitly NOT
+        # what this workflow does. We need the files on disk for Semgrep.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Install dependencies
         run: pip install -r requirements.txt
+      - name: Run Semgrep (p/ci ruleset)
+        # Pinned ruleset (not --config=auto, which pulls from Semgrep's
+        # registry on every run and is non-deterministic for CI). `|| true`
+        # tolerates semgrep's exit code 1 (findings found) and real errors
+        # (exit 2) without failing the workflow; the app treats a missing or
+        # empty JSON file as "no findings" and degrades gracefully.
+        run: semgrep scan --config=p/ci --json -o semgrep_results.json --exclude .venv --exclude .git . || true
       - name: Run review bot
         run: python app/main.py
