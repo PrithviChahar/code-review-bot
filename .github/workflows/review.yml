@@ -40,5 +40,7 @@ jobs:
         # (exit 2) without failing the workflow; the app treats a missing or
         # empty JSON file as "no findings" and degrades gracefully.
         run: semgrep scan --config=p/ci --json -o semgrep_results.json --exclude .venv --exclude .git . || true
+        # || true: intentional — see semgrep_runner.py fallback; a failed
+        # scan degrades to zero findings rather than failing the workflow
       - name: Run review bot
         run: python app/main.py
