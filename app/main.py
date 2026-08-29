@@ -1,7 +1,8 @@
-"""PR review bot entrypoint (M2): 4 parallel LangGraph agents, one comment.
+"""PR review bot entrypoint (M4): should_skip + supervisor layer.
 
 Reads the PR number from the GitHub Actions event payload (GITHUB_EVENT_PATH),
-fetches the diff, runs the agent graph, and posts the combined comment.
+fetches the diff, optionally short-circuits on tiny diffs, runs the agent graph
+with supervisor merge/dedup/rank/FP-filter, and posts the combined comment.
 """
 
 import json
@@ -15,8 +16,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from github_client import GitHubClient  # noqa: E402
 from graph import build_graph  # noqa: E402
+from supervisor import should_skip_review  # noqa: E402
 
 GRAPH = build_graph()
+
+SMALL_DIFF_COMMENT = (
+    "### Code Review Bot\n\n"
+    "This diff is too small for a full review (fewer than 5 meaningful "
+    "changed lines or whitespace/comment-only). No issues to report."
+)
 
 
 def load_event_payload():
@@ -49,6 +57,15 @@ def main():
     diff, truncated = client.fetch_pr_diff(pr_number)
     print(f"Reviewing PR #{pr_number} ({len(diff)} chars of diff, truncated={truncated})")
 
+    if should_skip_review(diff):
+        print("Diff too small for full review; posting short comment and skipping agents.")
+        try:
+            url = client.post_comment(pr_number, SMALL_DIFF_COMMENT)
+            print(f"Comment posted: {url}")
+        except requests.RequestException as err:
+            print(f"WARNING: could not post comment: {err}", file=sys.stderr)
+        return
+
     state = GRAPH.invoke(
         {
             "diff_text": diff,
@@ -59,6 +76,7 @@ def main():
             "test_result": [],
             "summary_result": "",
             "semgrep_findings": [],
+            "supervisor_result": [],
         }
     )
 

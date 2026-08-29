@@ -1,13 +1,14 @@
-"""LangGraph orchestration: parallel agents + semgrep-grounded security (M3).
+"""LangGraph orchestration: parallel agents + semgrep + supervisor (M4).
 
 Topology:
-    START -+-> reviewer -----+
-           |-> tests    -----+-> combine -> END
-           |-> summary  -----+
-           +-> semgrep -> security -----+
+    START -+-> reviewer ----+
+           |-> tests   ----+
+           |-> summary ----+-> supervisor -> combine -> END
+           +-> semgrep -> security --------+
 
 reviewer/tests/summary run in parallel; semgrep must complete before the
-security agent runs (it consumes Semgrep's findings as input).
+security agent runs. Supervisor merges reviewer+security, dedupes, ranks,
+and runs FP filtering. combine consumes the supervisor's output.
 """
 
 import random
@@ -41,6 +42,7 @@ class ReviewState(TypedDict):
     test_result: list
     summary_result: str
     semgrep_findings: list
+    supervisor_result: list
     comment: str
 
 
@@ -67,28 +69,66 @@ def security_node(state):
     return {"security_result": security.scan(state["diff_text"], state.get("semgrep_findings") or [])}
 
 
+def supervisor_node(state):
+    """Merge and dedup reviewer+security, then FP-filter. One LLM call."""
+    from supervisor import merge_and_rank, filter_false_positives
+
+    merged = merge_and_rank(
+        state.get("reviewer_result") or [],
+        state.get("security_result") or [],
+        state.get("diff_text", ""),
+        state.get("truncated", False),
+    )
+    flagged = filter_false_positives(merged)
+    return {"supervisor_result": flagged}
+
+
 def _format_issue_section(issues):
-    """Format an issues list grouped by severity. Empty list -> 'No issues found'."""
-    if not issues:
+    """Format issues grouped by severity. Likely FPs get their own subsection."""
+    real = [i for i in issues if not i.get("likely_fp")]
+    fps = [i for i in issues if i.get("likely_fp")]
+
+    if not real and not fps:
         return "No issues found."
-    lines = []
-    grouped = {}
-    for issue in issues:
-        severity = issue.get("severity")
-        if severity not in SEVERITY_ORDER:
-            severity = "nit"
-        grouped.setdefault(severity, []).append(issue)
-    for severity in sorted(grouped, key=lambda s: SEVERITY_ORDER[s]):
-        lines.append(f"**{severity.capitalize()} ({len(grouped[severity])})**")
-        lines.append("")
-        for issue in grouped[severity]:
+
+    parts = []
+    if real:
+        grouped = {}
+        for issue in real:
+            severity = issue.get("severity")
+            if severity not in SEVERITY_ORDER:
+                severity = "nit"
+            grouped.setdefault(severity, []).append(issue)
+        for severity in sorted(grouped, key=lambda s: SEVERITY_ORDER[s]):
+            parts.append(f"**{severity.capitalize()} ({len(grouped[severity])})**")
+            parts.append("")
+            for issue in grouped[severity]:
+                location = f"`{issue.get('file', '?')}`"
+                line = issue.get("line")
+                if isinstance(line, int):
+                    location += f":{line}"
+                source = issue.get("_source", "")
+                src_tag = f" _{source}_" if source else ""
+                parts.append(f"- {location} — {issue.get('message', '')}{src_tag}")
+            parts.append("")
+
+    if fps:
+        parts.append("<details>")
+        parts.append(f"<summary>Possible false positives ({len(fps)})</summary>")
+        parts.append("")
+        for issue in fps:
             location = f"`{issue.get('file', '?')}`"
             line = issue.get("line")
             if isinstance(line, int):
                 location += f":{line}"
-            lines.append(f"- {location} — {issue.get('message', '')}")
-        lines.append("")
-    return "\n".join(lines).rstrip()
+            source = issue.get("_source", "")
+            src_tag = f" _{source}_" if source else ""
+            parts.append(f"- {location} — {issue.get('message', '')}{src_tag}")
+        parts.append("")
+        parts.append("</details>")
+        parts.append("")
+
+    return "\n".join(parts).rstrip()
 
 
 def _format_gap_section(issues):
@@ -103,10 +143,9 @@ def _format_gap_section(issues):
 
 
 def combine_node(state):
-    """M2 combine: concatenate each agent's output under its own section.
+    """M4 combine: supervisor output replaces separate reviewer/security sections.
 
-    Fixed order: Summary, Reviewer, Security, Tests. No ranking/merging/dedup
-    yet — that is deferred to M4.
+    Fixed order: Summary, Issues (from supervisor), Tests.
     """
     parts = ["### Code Review Bot", ""]
     if state.get("truncated"):
@@ -115,13 +154,9 @@ def combine_node(state):
     parts.append("")
     parts.append(state.get("summary_result") or "No summary provided.")
     parts.append("")
-    parts.append("## Reviewer")
+    parts.append("## Issues")
     parts.append("")
-    parts.append(_format_issue_section(state.get("reviewer_result") or []))
-    parts.append("")
-    parts.append("## Security")
-    parts.append("")
-    parts.append(_format_issue_section(state.get("security_result") or []))
+    parts.append(_format_issue_section(state.get("supervisor_result") or []))
     parts.append("")
     parts.append("## Tests")
     parts.append("")
@@ -136,13 +171,17 @@ def build_graph():
     builder.add_node("tests", tests_node)
     builder.add_node("summary", summary_node)
     builder.add_node("semgrep", semgrep_node)
+    builder.add_node("supervisor", supervisor_node)
     builder.add_node("combine", combine_node)
     builder.add_edge(START, "reviewer")
     builder.add_edge(START, "tests")
     builder.add_edge(START, "summary")
     builder.add_edge(START, "semgrep")
     builder.add_edge("semgrep", "security")
-    for node in ("reviewer", "security", "tests", "summary"):
-        builder.add_edge(node, "combine")
+    builder.add_edge("reviewer", "supervisor")
+    builder.add_edge("security", "supervisor")
+    builder.add_edge("supervisor", "combine")
+    builder.add_edge("tests", "combine")
+    builder.add_edge("summary", "combine")
     builder.add_edge("combine", END)
     return builder.compile()
